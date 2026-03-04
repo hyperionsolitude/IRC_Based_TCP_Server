@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/types.h>
@@ -42,7 +43,7 @@ typedef struct {//Client structure  UPDATED
 client_t *client_array[C_NUM];
 char *str_duplicate(const char *str);
 void ceaser_enc(char arr[],int key);
-char *ceaser_dec(char arr[],int key);
+char *ceaser_dec(const char *arr,int key);
 void q_adr(client_t *client);
 void q_dlt(int user_id);
 void forward_message(char *str, int user_id);
@@ -69,10 +70,14 @@ int main(int argc, char *argv[]){
     struct sockaddr_in serv_addr;
     struct sockaddr_in client_address;
     pthread_t thread_id;
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s <port>\n", argv[0]);
-    exit(1);
-  }
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+
+    /* Initialize global RNG once */
+    srand((unsigned)time(NULL));
     /* Socket settings */
     listenfd = socket(AF_INET, SOCK_STREAM, 0);//storing socket
     serv_addr.sin_family = AF_INET;
@@ -113,7 +118,6 @@ int main(int argc, char *argv[]){
 		        break;
 		    }
 		}
-        srand(time(NULL));
 		client_pointer->user_id = user_id;// giving userid to the client struct for gathering all the info at one place
         client_pointer->group_id = 0;// at first everyone at lobby group 0
         client_pointer->msgtogrp = 0;// at first users send their message to everyone encrypted or not
@@ -138,20 +142,25 @@ char *str_duplicate(const char *str) {//Storing a copy of the input OLD
     return ptr;
 }
 
-void ceaser_enc(char arr[],int key){//Ceaser cryption   NEW
-	int i;
-	for(i = 0; i < strlen(arr); i++)
+void ceaser_enc(char *arr,int key){//Ceaser cryption   NEW
+	size_t i;
+	size_t len = strlen(arr);
+	for(i = 0; i < len; i++)
 	{
-	    arr[i]= arr[i] + key;
+	    arr[i]= (char)(arr[i] + key);
 	}
 }
 
-char *ceaser_dec(char arr[],int key){//Ceaser decryption    NEW
-	int i;
+char *ceaser_dec(const char *arr,int key){//Ceaser decryption    NEW
+	size_t i;
+	size_t len = strlen(arr);
 	char *ptr = str_duplicate(arr);
-	for(i = 0; i < strlen(arr); i++)
+	if (!ptr) {
+		return NULL;
+	}
+	for(i = 0; i < len; i++)
 	{
-	    ptr[i] = ptr[i] - key;
+	    ptr[i] = (char)(ptr[i] - key);
 	}
 	return ptr;
 }
@@ -191,7 +200,12 @@ void forward_message(char *str, int user_id){//Forwarding messages to other clie
         if (client_array[i]) {
             if (client_array[i]->user_id != user_id) {//until equals self
             	key=enc_key_array[client_array[i]->group_id];//reaching session key which is special to group
-            	snprintf(buff_out, sizeof(buff_out), "[%s] %s\r\n", client_array[user_id-1]->name, ceaser_dec(str, key));
+            	char *dec = ceaser_dec(str, key);
+            	if (!dec) {
+            		continue;
+            	}
+            	snprintf(buff_out, sizeof(buff_out), "[%s] %s\r\n", client_array[user_id-1]->name, dec);
+            	free(dec);
                 if (write(client_array[i]->connfd, buff_out, strlen(buff_out)) < 0) {
                     perror("Forwarding error");
                     break;
@@ -211,7 +225,12 @@ void group_forward(char *str, int user_id, int group_id){//     NEW
         if (client_array[i]) {
             if ((client_array[i]->user_id != user_id) && (client_array[i]->group_id== group_id)) {//until equals self
             	key=enc_key_array[client_array[i]->group_id];
-            	snprintf(buff_out, sizeof(buff_out), "[%s] %s\r\n", client_array[user_id-1]->name, ceaser_dec(str, key));
+            	char *dec = ceaser_dec(str, key);
+            	if (!dec) {
+            		continue;
+            	}
+            	snprintf(buff_out, sizeof(buff_out), "[%s] %s\r\n", client_array[user_id-1]->name, dec);
+            	free(dec);
                 if (write(client_array[i]->connfd, buff_out, strlen(buff_out)) < 0) {
                     perror("Forwarding error");
                     break;
@@ -599,7 +618,6 @@ void *client_handler(void *arg){//Providing communication  between all server an
             	if(param){
                     int face = atoi(param);
                     float half = 0;
-                    srand(time(NULL));
                     int die = (rand() % face) + 1;
                     sprintf(buff_out, " You rolled %d.\r\n", die);
                     forward_message_self(buff_out, client_pointer->connfd);
@@ -745,7 +763,6 @@ void *client_handler(void *arg){//Providing communication  between all server an
             	param = strtok(NULL, " ");
             	if(param){
                     char chosen = param[0];
-                    srand(time(NULL));
                     char rslt = rps[rand() % 3];
                     if(rslt == chosen){
                         sprintf(buff_out, " [Tie!] You choose %c. Server choose %c\r\n", chosen,rslt);
@@ -777,34 +794,34 @@ void *client_handler(void *arg){//Providing communication  between all server an
             	}
 
             } else if (strcmp(command, "/help") == 0) {
-                strcat(buff_out, "/quit ===========> Exit from server\r\n");
-                strcat(buff_out, "/info ===========> Ask your info to server\r\n");
-                strcat(buff_out, "/topic ==========> <topic_msg> Create a topic\r\n");
-                strcat(buff_out, "/nick ===========> <name> Create a nickname\r\n");
-                strcat(buff_out, "/list ===========> Show connected clients\r\n");
-                strcat(buff_out, "/msg ============> <user_id>(number) <msg> Send private message\r\n");
-                strcat(buff_out, "/create =========> <password> Create a group with password(number only)\r\n");
-                strcat(buff_out, "/join ===========> <group_id> <password> Join a group with password(number only)\r\n");
-                strcat(buff_out, "/dc =============> disconnected from group\r\n");
-                strcat(buff_out, "/grp_mem ========> Show connected clients in the group members\r\n");
-                strcat(buff_out, "/grp_list =======> Show active groups\r\n");
-                strcat(buff_out, "/grp_m ==========> Send one message to the group\r\n");
-                strcat(buff_out, "/grp_a ==========> [default=everyone]Toggles the destination of the messages Group or everyone\r\n");
-                strcat(buff_out, "/kick ===========> <user_id>(number) Kicks a member of group (Admin command) \r\n");
-                strcat(buff_out, "/dice ===========> <face_number> Rolls a die\r\n");
-                strcat(buff_out, "/rps ===========> <choose>(r or p or s) Rock paper scissors\r\n");
-				strcat(buff_out, "/duel ===========> <user_id> Invite to someone to Duel\r\n");
-                strcat(buff_out, "/accept ===========> <user_id> Accept Duel request from user\r\n");
-                strcat(buff_out, "/hp ===========>  <Requested health> Trading health points with rep points \r\n");
-                strcat(buff_out, "/attack ===========>  <Requested attack points> Trading attack points with rep points \r\n");
-                strcat(buff_out, "/help ===========> Show help\r\n");
-                forward_message_self(buff_out, client_pointer->connfd);
+                const char *help_text =
+                    "/quit ===========> Exit from server\r\n"
+                    "/info ===========> Ask your info to server\r\n"
+                    "/topic ==========> <topic_msg> Create a topic\r\n"
+                    "/nick ===========> <name> Create a nickname\r\n"
+                    "/list ===========> Show connected clients\r\n"
+                    "/msg ============> <user_id>(number) <msg> Send private message\r\n"
+                    "/create =========> <password> Create a group with password(number only)\r\n"
+                    "/join ===========> <group_id> <password> Join a group with password(number only)\r\n"
+                    "/dc =============> disconnected from group\r\n"
+                    "/grp_mem ========> Show connected clients in the group members\r\n"
+                    "/grp_list =======> Show active groups\r\n"
+                    "/grp_m ==========> Send one message to the group\r\n"
+                    "/grp_a ==========> [default=everyone]Toggles the destination of the messages Group or everyone\r\n"
+                    "/kick ===========> <user_id>(number) Kicks a member of group (Admin command) \r\n"
+                    "/dice ===========> <face_number> Rolls a die\r\n"
+                    "/rps ===========> <choose>(r or p or s) Rock paper scissors\r\n"
+                    "/duel ===========> <user_id> Invite to someone to Duel\r\n"
+                    "/accept =========> <user_id> Accept Duel request from user\r\n"
+                    "/hp ============> <Requested health> Trade health points with rep points \r\n"
+                    "/attack ========> <Requested attack points> Trade attack points with rep points \r\n"
+                    "/help ===========> Show help\r\n";
+                forward_message_self(help_text, client_pointer->connfd);
               }
             else {
                 forward_message_self(" Unknown command\r\nTo see commands use </help> \r\n", client_pointer->connfd);
             }
         } else {
-        	srand(time(NULL));
 			int key = rand() % 26;// random key generating between 0-26
 			enc_key_array[client_pointer->group_id]=key;// storing that random key to decrypt ciphers for group members
             ceaser_enc(input_buffer,key);// encryption of message
@@ -836,7 +853,7 @@ void *client_handler(void *arg){//Providing communication  between all server an
 }
 
 int create(int password,int user_id){//Creating a Group with password       NEW
-	int i,j;
+	int i;
 	if(group[GROUP_NUM-1][0] != 0){
         return -1;
 	}
@@ -850,52 +867,56 @@ int create(int password,int user_id){//Creating a Group with password       NEW
             }
         }
     }
+    return -1;
 }
 
 int join(int group_id,int password,int user_id){//Joining a Group with a password   NEW
     int i;
 
+	if(group_id < 0 || group_id >= GROUP_NUM){
+        return -1;
+    }
+
 	if(group[group_id][0] == 0){
         return -1;
     }
-    else{
-        if(password == password_arr[group_id]){
-            if(group[group_id][GROUP_MEM_NUM] != 0){
-            	return 2;
-			}
-			else{
-				for(i=1;i<GROUP_MEM_NUM;i++){
-                	if(group[group_id][i] == 0){
-                    	group[group_id][i]=user_id;
-                    	return 1;
-                	}
-            	}
-        	}
-		}
-        else if(password != password_arr[group_id]){
-            return 0;
+
+    if(password != password_arr[group_id]){
+        return 0;
+    }
+
+	for(i=1;i<GROUP_MEM_NUM;i++){
+        if(group[group_id][i] == 0){
+            group[group_id][i]=user_id;
+            return 1;
         }
     }
 
+    /* Group is full */
+    return 2;
 }
 
 void disconnect(int group_id, int user_id ){//Disconnecting from  a Group   NEW
-	int i,j;
+	int i;
 	int admin_check = 0;
-	for (i = 0; i < GROUP_MEM_NUM, group[group_id][i] != 0; i++) {
+	if (group_id <= 0 || group_id >= GROUP_NUM) {
+		return;
+	}
+
+	for (i = 0; i < GROUP_MEM_NUM && group[group_id][i] != 0; i++) {
 		if(group[group_id][i] == user_id){
 			if(i == 0)	admin_check = 1;
-			for (; i < GROUP_MEM_NUM, group[group_id][i] != 0; i++){
-				if (i == GROUP_MEM_NUM - 1) {
-					group[group_id][i] = 0;
-				}
-				else {
-					group[group_id][i] = group[group_id][i+1];
+			for (; i < GROUP_MEM_NUM - 1; i++){
+				group[group_id][i] = group[group_id][i+1];
+				if (group[group_id][i] == 0) {
+					break;
 				}
 			}
+			group[group_id][GROUP_MEM_NUM - 1] = 0;
+			break;
 		}
 	}
-	if (admin_check == 1)
+	if (admin_check == 1 && group[group_id][0] != 0)
 		msg_from_sv_to_clt("You are the Admin now. Have Fun.\r\n", group[group_id][0]);
 }
 
@@ -913,7 +934,6 @@ int fight(int duelist_1,int duelist_2){//   NEW
     duelist_1= duelist_1 - 1;
     duelist_2= duelist_2 - 1;
     int turn;
-    srand(time(NULL));
     while(client_array[duelist_1]->health > 0.0 && client_array[duelist_2]->health > 0.0){
         turn = (rand() % 2) + 1;
         if(turn == 2){
